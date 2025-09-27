@@ -1,0 +1,31 @@
+# Vagrant
+.vagrant/
+*.box
+.vagrant_user
+
+# VirtualBox
+*.vdi
+*.vmdk
+*.vbox
+*.vbox-prev
+
+# Logs
+*.log
+vagrant_logs/
+
+# Fichiers temporaires
+*.tmp
+tmp/
+
+# Fichiers générés par Kubernetes
+join-command.sh
+kubeadm-init.log
+admin.conf
+
+# Fichiers de configuration locaux
+kubeconfig/
+.kube/config.local
+
+# Fichiers de données temporaires
+data/
+tmp-data/
