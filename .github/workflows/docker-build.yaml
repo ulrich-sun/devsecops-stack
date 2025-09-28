@@ -1,0 +1,59 @@
+name: Docker Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docker/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docker/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        image:
+          - kubernetes_v2
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ✅ Vérifie si un dossier a changé avant de builder
+      - name: Check if folder changed
+        id: changes
+        run: |
+          if git diff --name-only ${{ github.base_ref }} ${{ github.sha }} | grep "^docker/${{ matrix.image }}/"; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ✅ Build & push seulement si modifié
+      - name: Build and push Docker image
+        if: steps.changes.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/${{ matrix.image }}
+          file: ./docker/${{ matrix.image }}/Dockerfile
+          push: true
+          build-args: |
+            KUBERNETES_VERSION=1.32.0
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/k8s-${{ matrix.image }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/k8s-${{ matrix.image }}:${{ github.sha }}

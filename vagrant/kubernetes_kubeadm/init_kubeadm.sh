@@ -1,15 +1,20 @@
 #!/bin/bash
-
-# Script d'installation Kubernetes avec containerd (recommandé)
 set -e
 
-HOSTNAME=$(hostname)
-LOG_FILE="/var/log/k8s-install.log"
+# === Version unique à modifier ===
+K8S_VERSION="1.33.0"  # ← Change cette valeur pour mettre à jour toute la stack Kubernetes
 
-# Fonction de logging
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a $LOG_FILE
-}
+# === Variables dérivées automatiquement ===
+K8S_DEB_VERSION="${K8S_VERSION}-1.1"
+K8S_REPO_VERSION="v${K8S_VERSION%.*}"
+K8S_REPO_URL="https://pkgs.k8s.io/core:/stable:/${K8S_REPO_VERSION}/deb/"
+CRI_SOCKET="unix:///var/run/containerd/containerd.sock"
+POD_NETWORK_CIDR="10.244.0.0/16"
+INTERFACE="enp0s8"
+JOIN_COMMAND_FILE="/vagrant/join-command.sh"
+KUBEADM_LOG="kubeadm-init.log"
+LOG_FILE="/var/log/k8s-install.log"
+HOSTNAME=$(hostname)
 
 # Désactiver temporairement (jusqu'au reboot)
 sudo swapoff -a
@@ -20,278 +25,157 @@ sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 # Ou plus précis pour Ubuntu
 sudo sed -i '/swap.img/d' /etc/fstab
 
-log "Début de l'installation Kubernetes avec containerd pour $HOSTNAME"
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a $LOG_FILE
+}
 
-# Vérifications préalables
 check_existing_installation() {
     log "Vérification des installations existantes..."
-    
     if command -v kubeadm &> /dev/null; then
         log "WARNING: kubeadm déjà installé"
         kubeadm version
-        log "Utilisez 'kubeadm reset' pour réinitialiser si nécessaire"
         exit 1
     fi
-    
-    # Vérifier les runtimes en conflit
     if systemctl is-active --quiet docker; then
-        log "WARNING: Docker est actif. Voulez-vous continuer avec containerd ? (y/N)"
+        log "WARNING: Docker est actif. Continuer avec containerd ? (y/N)"
         read -r response
-        if [[ ! "$response" =~ ^[Yy]$ ]]; then
-            log "Installation annulée"
-            exit 1
-        fi
+        [[ ! "$response" =~ ^[Yy]$ ]] && exit 1
     fi
 }
 
-# Installation des pré-requis
 install_prerequisites() {
     log "Installation des pré-requis..."
     sudo apt-get update
-    sudo apt-get install -y \
-        apt-transport-https \
-        ca-certificates \
-        curl \
-        gpg \
-        conntrack \
-        socat
+    sudo apt-get install -y apt-transport-https ca-certificates curl gpg conntrack socat
 }
 
-# Configuration des modules et paramètres système
 setup_system_config() {
-    log "Configuration des modules kernel et paramètres réseau..."
-    
-    # Modules kernel
+    log "Configuration du système..."
     sudo modprobe overlay
     sudo modprobe br_netfilter
-    
-    cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
-overlay
-br_netfilter
-EOF
-    
-    # Paramètres sysctl
-    cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-EOF
-    
+    echo -e "overlay\nbr_netfilter" | sudo tee /etc/modules-load.d/k8s.conf
+    echo -e "net.bridge.bridge-nf-call-iptables=1\nnet.bridge.bridge-nf-call-ip6tables=1\nnet.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/k8s.conf
     sudo sysctl --system
 }
 
-# Installation de containerd
-install_containerd() {
-    log "Installation de containerd..."
-    
-    if ! command -v containerd &> /dev/null; then
-        # Installation via le script officiel Docker (qui inclut containerd)
-        curl -fsSL https://get.docker.com | sudo sh
-        
-        # Arrêter Docker si on ne l'utilise pas
-        sudo systemctl stop docker
-        sudo systemctl disable docker
-        
-        # Ou installation directe de containerd
-        # sudo apt-get install -y containerd.io
-    else
-        log "INFO: containerd déjà installé"
-    fi
-    
-    # Configuration de containerd
-    sudo mkdir -p /etc/containerd
-    containerd config default | sudo tee /etc/containerd/config.toml
-    
-    # Configuration du cgroup driver pour systemd
-    sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-    
-    # Redémarrage de containerd
-    sudo systemctl restart containerd
-    sudo systemctl enable containerd
-}
-
-# Installation alternative containerd (plus propre)
 install_containerd_clean() {
-    log "Installation propre de containerd..."
-    
+    log "Installation de containerd..."
     if ! command -v containerd &> /dev/null; then
-        # Ajout du dépôt Docker
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-        
         echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-        
         sudo apt-get update
         sudo apt-get install -y containerd.io
-    else
-        log "INFO: containerd déjà installé"
     fi
-    
-    # Configuration de containerd
     sudo mkdir -p /etc/containerd
     containerd config default | sudo tee /etc/containerd/config.toml > /dev/null
-    
-    # Configuration systemd cgroup driver
     sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-    
-    # Redémarrage
     sudo systemctl restart containerd
     sudo systemctl enable containerd
-    
-    log "containerd configuré avec SystemdCgroup"
 }
 
-# Installation du dépôt Kubernetes
 setup_k8s_repo() {
-    if [ ! -f /etc/apt/sources.list.d/kubernetes.list ]; then
-        log "Configuration du dépôt Kubernetes..."
-        sudo mkdir -p -m 755 /etc/apt/keyrings
-        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-        echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-        sudo apt-get update
-    else
-        log "INFO: Dépôt Kubernetes déjà configuré"
-    fi
+    log "Ajout du dépôt Kubernetes..."
+    sudo mkdir -p -m 755 /etc/apt/keyrings
+    curl -fsSL ${K8S_REPO_URL}Release.key | sudo gpg --batch --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] $K8S_REPO_URL /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+    sudo apt-get update
 }
 
-# Installation des composants Kubernetes
 install_k8s_components() {
-    log "Installation kubelet, kubeadm, kubectl..."
-    sudo apt-get install -y kubelet kubeadm kubectl
+    log "Installation des composants Kubernetes version $K8S_DEB_VERSION..."
+    sudo apt-get install -y \
+        kubelet=$K8S_DEB_VERSION \
+        kubeadm=$K8S_DEB_VERSION \
+        kubectl=$K8S_DEB_VERSION
     sudo apt-mark hold kubelet kubeadm kubectl
     sudo systemctl enable --now kubelet
 }
 
-# Configuration du master node
 setup_master_node() {
     if [ ! -f /etc/kubernetes/admin.conf ]; then
-        log "Initialisation du cluster master avec containerd..."
-        
-        # Pré-téléchargement des images
-        sudo kubeadm config images pull
-        host_ip=$(ip -f inet addr show enp0s8 | sed -En -e 's/.*inet ([0-9.]+).*/\1/p')
-        # Initialisation du cluster
+        log "Initialisation du master..."
+        sudo kubeadm config images pull --kubernetes-version=$K8S_VERSION
+        host_ip=$(ip -f inet addr show $INTERFACE | sed -En -e 's/.*inet ([0-9.]+).*/\1/p')
         sudo kubeadm init \
             --apiserver-advertise-address=$host_ip \
-            --pod-network-cidr=10.244.0.0/16 \
-            --cri-socket=unix:///var/run/containerd/containerd.sock \
-            | sudo tee kubeadm-init.log
-        
-        # Configuration kubectl pour l'utilisateur
+            --pod-network-cidr=$POD_NETWORK_CIDR \
+            --cri-socket=$CRI_SOCKET \
+            --kubernetes-version=$K8S_VERSION | sudo tee $KUBEADM_LOG
+
         mkdir -p $HOME/.kube
         sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
         sudo chown $(id -u):$(id -g) $HOME/.kube/config
-        
-        # Configuration kubectl pour vagrant
+
         sudo mkdir -p /home/vagrant/.kube
         sudo cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
         sudo chown vagrant:vagrant /home/vagrant/.kube/config
-        
-        # Sauvegarde de la commande join
-        sudo grep "kubeadm join" kubeadm-init.log -A 2 > /home/vagrant/join-command.sh
-        sudo chmod +x /home/vagrant/join-command.sh
-        
-        # Copie vers le dossier partagé Vagrant
-        sudo cp /home/vagrant/join-command.sh /vagrant/ 2>/dev/null || true
-        
-        # Installation du CNI (Flannel)
-        log "Installation de Flannel CNI..."
+
+        sudo grep "kubeadm join" $KUBEADM_LOG -A 2 > $JOIN_COMMAND_FILE
+        sudo chmod +x $JOIN_COMMAND_FILE
+        sudo cp $JOIN_COMMAND_FILE /vagrant/ 2>/dev/null || true
+
         kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
-        
-        # Permettre le scheduling sur le master (pour lab/dev)
-        kubectl taint nodes $(hostname) node-role.kubernetes.io/control-plane:NoSchedule- || true
-        
-        log "Master node configuré avec succès!"
-        
-        # Vérification
+        kubectl taint nodes $HOSTNAME node-role.kubernetes.io/control-plane:NoSchedule- || true
+
+        log "Master initialisé avec succès"
         sleep 30
         kubectl get nodes
         kubectl get pods -A
-        
     else
-        log "WARNING: Cluster déjà initialisé"
-        kubectl get nodes 2>/dev/null || log "Problème avec la configuration kubectl"
+        log "Cluster déjà initialisé"
     fi
 }
 
-# Configuration du worker node
 setup_worker_node() {
-    log "Configuration du worker node..."
-    
-    # Vérifier si déjà joint au cluster
+    log "Configuration du worker..."
     if [ -f /etc/kubernetes/kubelet.conf ]; then
-        log "INFO: Worker déjà joint au cluster"
+        log "Worker déjà joint"
         return
     fi
-    
-    # Attendre la disponibilité de la commande join
-    JOIN_COMMAND_FILE="/vagrant/join-command.sh"
-    TIMEOUT=300  # 5 minutes
+
     ELAPSED=0
-    
-    while [ ! -f "$JOIN_COMMAND_FILE" ] && [ $ELAPSED -lt $TIMEOUT ]; do
-        log "Attente de la commande join du master... ($ELAPSED/$TIMEOUT)"
+    while [ ! -f "$JOIN_COMMAND_FILE" ] && [ $ELAPSED -lt 300 ]; do
+        log "Attente de la commande join... ($ELAPSED/300)"
         sleep 10
         ELAPSED=$((ELAPSED + 10))
     done
-    
+
     if [ -f "$JOIN_COMMAND_FILE" ]; then
-        log "Jointure au cluster..."
-        # Ajouter le socket containerd à la commande join
-        sudo sed -i 's/kubeadm join/kubeadm join --cri-socket=unix:\/\/\/var\/run\/containerd\/containerd.sock/' "$JOIN_COMMAND_FILE"
+        sudo sed -i "s|kubeadm join|kubeadm join --cri-socket=$CRI_SOCKET|" "$JOIN_COMMAND_FILE"
         sudo bash "$JOIN_COMMAND_FILE"
-        log "Worker joint avec succès!"
+        log "Worker joint avec succès"
     else
-        log "ERROR: Impossible de trouver la commande join après $TIMEOUT secondes"
-        log "Jointure manuelle requise avec:"
-        log "sudo kubeadm join <master-ip>:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash> --cri-socket=unix:///var/run/containerd/containerd.sock"
+        log "Commande join introuvable après 5 minutes"
     fi
 }
 
-# Fonction principale
 main() {
     check_existing_installation
     install_prerequisites
     setup_system_config
-    install_containerd_clean  # Version propre de containerd
+    install_containerd_clean
     setup_k8s_repo
     install_k8s_components
-    
-    # Configuration selon le rôle
+
     case $HOSTNAME in
-        "master")
-            setup_master_node
-            ;;
-        "worker"*)
-            setup_worker_node
-            ;;
-        *)
-            log "Hostname non reconnu: $HOSTNAME. Installation de base terminée."
-            log "Hostnames supportés: 'master' pour master, 'worker*' pour workers"
-            ;;
+        "master") setup_master_node ;;
+        "worker"*) setup_worker_node ;;
+        *) log "Nom d'hôte non reconnu : $HOSTNAME" ;;
     esac
-    
-    log "Installation terminée pour $HOSTNAME!"
+
+    log "Installation terminée pour $HOSTNAME"
 }
 
-# Fonction de diagnostic
-diagnostic() {
+if [ "$1" = "--diagnostic" ]; then
     log "=== DIAGNOSTIC ==="
-    log "Version containerd: $(containerd --version 2>/dev/null || echo 'Non installé')"
+    log "containerd: $(containerd --version 2>/dev/null || echo 'Non installé')"
+    log "kubelet: $(kubelet --version 2>/dev/null || echo 'Non installé')"
     log "Status containerd: $(systemctl is-active containerd)"
-    log "Version kubelet: $(kubelet --version 2>/dev/null || echo 'Non installé')"
     log "Status kubelet: $(systemctl is-active kubelet)"
-    
     if [ "$HOSTNAME" = "master" ]; then
-        log "Nodes du cluster:"
         kubectl get nodes 2>/dev/null || log "Erreur kubectl"
-        log "Pods système:"
         kubectl get pods -n kube-system 2>/dev/null || log "Erreur kubectl"
     fi
-}
-
-# Exécution
-if [ "$1" = "--diagnostic" ]; then
-    diagnostic
 else
     main "$@"
 fi

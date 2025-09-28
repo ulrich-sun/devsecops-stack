@@ -1,3 +1,12 @@
+
+#Git Utils
+git add .
+git commit -m "Initial commit - ajout du rôle Kubernetes"
+git tag v1.0.0
+git push origin main
+git push origin v1.0.0
+
+
 #Vagrant utils
 vagrant destroy -f
 
