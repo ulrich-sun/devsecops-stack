@@ -28,12 +28,20 @@ RUN mkdir -p /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # Installer Kubernetes
-RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - \
-    && apt-add-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main" \
+ARG KUBERNETES_VERSION=1.27.2
+
+# Ajouter le dépôt Kubernetes officiel moderne
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://pkgs.k8s.io/core:/stable:/v${KUBERNETES_VERSION%.*}/deb/Release.key \
+       | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
+       https://pkgs.k8s.io/core:/stable:/v${KUBERNETES_VERSION%.*}/deb/ /" \
+       | tee /etc/apt/sources.list.d/kubernetes.list \
     && apt-get update \
-    && apt-get install -y kubelet=1.27.2-00 kubeadm=1.27.2-00 kubectl=1.27.2-00 \
+    && apt-get install -y kubelet=${KUBERNETES_VERSION}-00 kubeadm=${KUBERNETES_VERSION}-00 kubectl=${KUBERNETES_VERSION}-00 \
     && apt-mark hold kubelet kubeadm kubectl \
     && rm -rf /var/lib/apt/lists/*
+
 
 # Installer jq et docker-compose
 RUN curl -Lf -o /usr/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.5/jq-linux64 \
