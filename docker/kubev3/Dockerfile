@@ -28,7 +28,7 @@ RUN mkdir -p /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # Installer Kubernetes
-ARG KUBERNETES_VERSION=1.27.2
+ARG KUBERNETES_VERSION=1.31.0
 
 # Ajouter le dépôt Kubernetes officiel moderne
 RUN mkdir -p /etc/apt/keyrings \
