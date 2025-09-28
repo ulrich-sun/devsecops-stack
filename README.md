@@ -24,3 +24,13 @@ dos2unix init_kubeadm.sh.containerd
 
 # Puis exécuter
 bash init_kubeadm.sh.containerd
+
+
+
+
+docker run -it --rm \
+  --privileged \
+  --name k8s-control-plane \
+  -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  k8s bash
