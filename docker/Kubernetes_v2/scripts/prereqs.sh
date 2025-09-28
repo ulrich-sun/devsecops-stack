@@ -12,9 +12,9 @@ apt-get update && apt-get install -y \
     socat \
     && rm -rf /var/lib/apt/lists/*
 
-echo "[INFO] 🔹 Chargement des modules kernel"
-modprobe overlay
-modprobe br_netfilter
+# echo "[INFO] 🔹 Chargement des modules kernel"
+# modprobe overlay
+# modprobe br_netfilter
 
 cat <<EOF | tee /etc/modules-load.d/k8s.conf
 overlay
