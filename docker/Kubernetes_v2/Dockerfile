@@ -7,7 +7,7 @@ ENV KUBERNETES_VERSION=${KUBERNETES_VERSION}
 # 🔹 Mise à jour et installation de dépendances de base
 RUN apt-get update && apt-get install -y \
     systemd sudo vim net-tools iproute2 iputils-ping \
-    curl wget gnupg2 lsb-release \
+    curl wget gnupg2 lsb-release kmod \
     && rm -rf /var/lib/apt/lists/*
 
 # 🔹 Copier les scripts externes
