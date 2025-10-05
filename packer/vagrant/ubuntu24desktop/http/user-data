@@ -1,0 +1,40 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  network:
+    network:
+      version: 2
+      ethernets:
+        enp0s3:
+          dhcp4: true
+  storage:
+    layout:
+      name: direct
+  identity:
+    hostname: vagrant
+    username: vagrant
+    # Password hash for 'vagrant' (generated with: openssl passwd -6 vagrant)
+    password: '$6$2ZQLDQbWuhgp.Flk$oIOBlsnzJIKMNiK1gh6VT0FR/QgT1jD9xdQJhmHWCtK5nwHEjk4ZHcSiALqty5sPpQ7A8XtiLhZY4sReXdqL3.'
+  ssh:
+    install-server: true
+    allow-pw: true
+  packages:
+    - openssh-server
+    - build-essential
+    - curl
+    - wget
+    - vim
+    - sudo
+  user-data:
+    disable_root: false
+  late-commands:
+    - 'sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/g" /target/etc/ssh/sshd_config'
+    - 'sed -i "s/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/g" /target/etc/ssh/sshd_config'
+    - 'sed -i "s/^#*PermitRootLogin .*/PermitRootLogin yes/g" /target/etc/ssh/sshd_config'
+    - 'echo "vagrant ALL=(ALL) NOPASSWD:ALL" > /target/etc/sudoers.d/vagrant'
+    - 'chmod 440 /target/etc/sudoers.d/vagrant'
+    - 'systemctl enable ssh --root=/target'
+    - 'curtin in-target --target=/target -- systemctl enable ssh'

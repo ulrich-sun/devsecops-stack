@@ -29,3 +29,70 @@ kubeconfig/
 # Fichiers de données temporaires
 data/
 tmp-data/
+# Packer
+# Cache et builds
+packer_cache/
+output-*/
+builds/*.box
+*.box
+
+# Logs Packer
+crash.log
+*.log
+
+# ISOs téléchargés
+*.iso
+*.iso.checksum
+
+# Fichiers temporaires Packer
+.packer/
+
+# Vagrant
+.vagrant/
+*.box
+
+# VirtualBox
+*.vdi
+*.vmdk
+*.vbox
+*.vbox-prev
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Clés SSH (si générées)
+*.pem
+*.key
+id_rsa*
+
+# Fichiers de configuration locaux
+*.local
+.env
+.envrc
+
+# Répertoires de build
+output/
+tmp/
+
+# Fichiers Python (si tu utilises des scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains IDEs
+.idea/
+*.iml
+
+# Fichiers de backup
+*.bak
+*.backup

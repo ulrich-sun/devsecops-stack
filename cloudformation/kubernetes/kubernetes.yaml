@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: '2010-09-28'
+Description: Cluster Kubernetes avec un master et 2 workers, join automatique
+
+Parameters:
+  KeyName:
+    Type: String
+    Description: Clé SSH pour accéder aux instances
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    Description: Type d'instance EC2
+  S3Bucket:
+    Type: String
+    Description: Bucket S3 pour partager le join-command
+
+Resources:
+  # --- VPC & Subnet ---
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: k8s-vpc
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  # --- Security Group ---
+  K8sSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Kubernetes SG
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 10250
+          ToPort: 10250
+          CidrIp: 0.0.0.0/0
+
+  # --- Master EC2 ---
+  MasterInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: ami-0c02fb55956c7d316 # Ubuntu 22.04 LTS
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref K8sSecurityGroup
+      Tags:
+        - Key: Name
+          Value: master
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          LOG_FILE=/var/log/k8s-install.log
+          K8S_VERSION="1.33.0"
+          K8S_DEB_VERSION="${K8S_VERSION}-1.1"
+          K8S_REPO_VERSION="v${K8S_VERSION%.*}"
+          K8S_REPO_URL="https://pkgs.k8s.io/core:/stable:/${K8S_REPO_VERSION}/deb/"
+
+          log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a $LOG_FILE; }
+
+          log "Installation des prérequis..."
+          apt-get update
+          apt-get install -y apt-transport-https ca-certificates curl gpg conntrack socat awscli
+
+          log "Installation de containerd..."
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y containerd.io
+          mkdir -p /etc/containerd
+          containerd config default > /etc/containerd/config.toml
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl restart containerd
+          systemctl enable containerd
+
+          log "Installation Kubernetes..."
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL ${K8S_REPO_URL}Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] $K8S_REPO_URL /" > /etc/apt/sources.list.d/kubernetes.list
+          apt-get update
+          apt-get install -y kubelet=$K8S_DEB_VERSION kubeadm=$K8S_DEB_VERSION kubectl=$K8S_DEB_VERSION
+          apt-mark hold kubelet kubeadm kubectl
+          systemctl enable --now kubelet
+
+          log "Initialisation du master..."
+          kubeadm init --pod-network-cidr=10.244.0.0/16 --kubernetes-version=$K8S_VERSION > /tmp/kubeadm-init.log
+          mkdir -p /home/ubuntu/.kube
+          cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+          chown ubuntu:ubuntu /home/ubuntu/.kube/config
+          kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+
+          log "Export de la commande join..."
+          JOIN_CMD=$(grep "kubeadm join" /tmp/kubeadm-init.log -A 2 | sed 's|$| --cri-socket=unix:///var/run/containerd/containerd.sock|')
+          echo $JOIN_CMD > /tmp/join-command.sh
+          aws s3 cp /tmp/join-command.sh s3://${S3Bucket}/join-command.sh
+
+  # --- Worker EC2 ---
+  Worker1Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: ami-0c02fb55956c7d316
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref K8sSecurityGroup
+      Tags:
+        - Key: Name
+          Value: worker1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          LOG_FILE=/var/log/k8s-install.log
+          K8S_VERSION="1.33.0"
+          K8S_DEB_VERSION="${K8S_VERSION}-1.1"
+          K8S_REPO_VERSION="v${K8S_VERSION%.*}"
+          K8S_REPO_URL="https://pkgs.k8s.io/core:/stable:/${K8S_REPO_VERSION}/deb/"
+
+          log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a $LOG_FILE; }
+
+          log "Installation prérequis..."
+          apt-get update
+          apt-get install -y apt-transport-https ca-certificates curl gpg conntrack socat awscli
+
+          log "Installation de containerd..."
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y containerd.io
+          mkdir -p /etc/containerd
+          containerd config default > /etc/containerd/config.toml
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl restart containerd
+          systemctl enable containerd
+
+          log "Installation Kubernetes..."
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL ${K8S_REPO_URL}Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] $K8S_REPO_URL /" > /etc/apt/sources.list.d/kubernetes.list
+          apt-get update
+          apt-get install -y kubelet=$K8S_DEB_VERSION kubeadm=$K8S_DEB_VERSION kubectl=$K8S_DEB_VERSION
+          apt-mark hold kubelet kubeadm kubectl
+          systemctl enable --now kubelet
+
+          log "Récupération du join-command depuis S3..."
+          ELAPSED=0
+          while [ $ELAPSED -lt 300 ]; do
+            if aws s3 cp s3://${S3Bucket}/join-command.sh /tmp/join-command.sh; then
+              bash /tmp/join-command.sh
+              log "Worker joint avec succès"
+              break
+            else
+              log "Attente du join-command... ($ELAPSED/300)"
+              sleep 10
+              ELAPSED=$((ELAPSED + 10))
+            fi
+          done
+
+  Worker2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: ami-0c02fb55956c7d316
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref K8sSecurityGroup
+      Tags:
+        - Key: Name
+          Value: worker2
+      UserData: !Ref Worker1Instance.UserData
+
+Outputs:
+  MasterPublicIP:
+    Description: "IP publique du master Kubernetes"
+    Value: !GetAtt MasterInstance.PublicIp

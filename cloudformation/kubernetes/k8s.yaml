@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kubernetes Cluster with dynamic Ubuntu AMI and full VPC provisioning
+
+Parameters:
+  MasterCount:
+    Description: Number of Master nodes
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 3
+
+  WorkerCount:
+    Description: Number of Worker nodes
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 3
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair for SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: devops
+
+  SSHLocation:
+    Description: The IP address range that can SSH to the EC2 instances
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: (\d{1,3}\.){3}\d{1,3}/\d{1,2}
+    ConstraintDescription: Must be a valid CIDR range
+
+  InstanceType:
+    Description: EC2 instance type for master and worker nodes
+    Type: String
+    Default: t3.medium
+
+  StorageSize:
+    Description: Root volume size in GB
+    Type: Number
+    Default: 20
+
+  KubernetesVersion:
+    Description: Kubernetes version to install (e.g., 1.33.0)
+    Type: String
+    Default: 1.33.0
+
+Resources:
+
+  # VPC and Networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-rt"
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet"
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH, Kubernetes ports
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 10250
+          ToPort: 10250
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 30000
+          ToPort: 32767
+          CidrIp: !Ref SSHLocation
+
+  # IAM Role for EC2 to retrieve join-command via SSM
+  EC2K8sRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2K8sRole
+      Path: /
+
+  # Retrieve the latest Ubuntu AMI ID using SSM Parameter Store
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/canonical/ubuntu/server/noble/stable/current/amd64/hvm/ebs-gp3/ami-id'
+
+  # Master Node Launch Template
+  MasterLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-master-lt"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        KeyName: !Ref KeyName
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            SubnetId: !Ref PublicSubnet
+            GroupSet:
+              - !Ref SecurityGroup
+        UserData:
+          'Fn::Base64': !Sub |
+            #!/bin/bash
+            set -e
+            LOG_FILE=/var/log/k8s-install.log
+            exec > >(tee -a ${LOG_FILE}) 2>&1
+            swapoff -a
+            sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+            sed -i '/swap.img/d' /etc/fstab
+            INTERFACE="eth0"
+            K8S_VERSION="${KubernetesVersion}"
+            POD_NETWORK_CIDR="10.244.0.0/16"
+            CRI_SOCKET="unix:///var/run/containerd/containerd.sock"
+            # modprobe & sysctl
+            modprobe overlay
+            modprobe br_netfilter
+            echo -e "overlay\nbr_netfilter" > /etc/modules-load.d/k8s.conf
+            echo -e "net.bridge.bridge-nf-call-iptables=1\nnet.bridge.bridge-nf-call-ip6tables=1\nnet.ipv4.ip_forward=1" > /etc/sysctl.d/k8s.conf
+            sysctl --system
+            # containerd install
+            if ! command -v containerd &> /dev/null; then
+              apt-get update
+              apt-get install -y containerd
+              mkdir -p /etc/containerd
+              containerd config default | tee /etc/containerd/config.toml
+              sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+              systemctl restart containerd
+              systemctl enable containerd
+            fi
+            # Kubernetes repo and install
+            mkdir -p /etc/apt/keyrings
+            K8S_REPO_URL="https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION%.*}/deb/"
+            curl -fsSL ${K8S_REPO_URL}Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] $K8S_REPO_URL /" | tee /etc/apt/sources.list.d/kubernetes.list
+            apt-get update
+            apt-get install -y kubelet=${K8S_VERSION}-1.1 kubeadm=${K8S_VERSION}-1.1 kubectl=${K8S_VERSION}-1.1
+            apt-mark hold kubelet kubeadm kubectl
+            systemctl enable --now kubelet
+            # Initialize Master
+            if [ ! -f /etc/kubernetes/admin.conf ]; then
+              host_ip=$(ip -f inet addr show $INTERFACE | sed -En -e 's/.*inet ([0-9.]+).*/\1/p')
+              kubeadm config images pull --kubernetes-version=$K8S_VERSION
+              kubeadm init --apiserver-advertise-address=$host_ip --pod-network-cidr=$POD_NETWORK_CIDR --cri-socket=$CRI_SOCKET --kubernetes-version=$K8S_VERSION | tee /var/log/kubeadm-init.log
+              mkdir -p $HOME/.kube
+              cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+              chown $(id -u):$(id -g) $HOME/.kube/config
+              # Save join-command for workers
+              kubeadm token create --print-join-command > /tmp/kubeadm_join.sh
+            fi
+
+  # Master Auto Scaling Group
+  MasterAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet
+      LaunchTemplate:
+        LaunchTemplateId: !Ref MasterLaunchTemplate
+        Version: !GetAtt
+::contentReference[oaicite:0]{index=0}
+ 
