@@ -1,0 +1,35 @@
+---
+kubernetes_apiserver_advertise_address: "{{ ansible_host }}"
+kubernetes_version_rhel_package: '1.31.1'
+token: "783bde.3f89s0fje9f38fhf"
+installation_method: "vagrant"
+kubernetes_kubelet_extra_args: "--node-ip={{ ansible_enp0s8.ipv4.address }}"
+# The follow two parameter was explained here https://github.com/geerlingguy/ansible-role-kubernetes#variables-to-configure-kubeadm-and-kubelet-through-command-line-options
+kubernetes_pod_network:
+  cni: 'flannel'
+  cidr: '10.244.0.0/16'
+kubernetes_yum_gpg_check: true
+kubernetes_yum_repo_gpg_check: true
+kubernetes_yum_base_url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_rhel_package.split('.')[:2]  | join('.') }}/rpm/"
+kubernetes_yum_gpg_key: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_rhel_package.split('.')[:2]  | join('.') }}/rpm/repodata/repomd.xml.key"
+kubernetes_version: "{{ kubernetes_version_rhel_package.split('.')[:2]  | join('.') }}"
+kubernetes_config_kube_proxy_configuration:
+  ipvs:
+    strictARP: true 
+kubernetes_config_kubelet_configuration:
+  cgroupDriver: "systemd"
+  failSwapOn: false
+kubernetes_config_init_configuration:
+  # details of these parameters could be found here https://pkg.go.dev/k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta1
+  localAPIEndpoint:
+    advertiseAddress: "{{ kubernetes_apiserver_advertise_address | default(ansible_default_ipv4.address, true) }}"
+  bootstrapTokens:
+    - token: "{{ token }}"
+      description: "another bootstrap token"
+      usages:
+      - authentication
+      - signing
+      groups:
+      - system:bootstrappers:kubeadm:default-node-token
+kubernetes_allow_pods_on_master: true
+swap_disabled: true
